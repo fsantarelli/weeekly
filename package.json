@@ -1,0 +1,21 @@
+{
+  "name": "weeekly",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "test": "node --check api/weekly-reminder.js"
+  },
+  "dependencies": {
+    "chrono-node": "^2.8.4",
+    "imapflow": "^1.0.191",
+    "mailparser": "^3.7.4"
+  },
+  "devDependencies": {
+    "vercel": "^44.2.6"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

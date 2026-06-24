@@ -9,6 +9,7 @@ This project is designed for Vercel serverless functions and Vercel Cron. It rea
 - `GET /api/weekly-reminder`
   - Runs the reminder job.
   - Triggered by Vercel Cron every Sunday.
+  - Add `?preview=1` to return the generated message without sending it.
 
 - `GET /api/telegram-chat-id`
   - Helper endpoint for setup.
@@ -63,3 +64,12 @@ npm test
 ```
 
 For local execution, create a `.env` file if needed. `.env` files are ignored by git.
+
+## Preview
+
+Inspect the generated summary without sending a Telegram message:
+
+```bash
+curl -H "Authorization: Bearer <CRON_SECRET>" \
+  "https://<your-vercel-domain>/api/weekly-reminder?preview=1"
+```

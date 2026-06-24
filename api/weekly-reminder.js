@@ -31,14 +31,19 @@ export default async function handler(req, res) {
     const events = extractWeeklyYear2Events(messages, week);
     const text = formatTelegramMessage(events, week);
 
-    await sendTelegramMessage(env, text);
+    const preview = req.query?.preview === "1" || req.query?.preview === "true";
+    if (!preview) {
+      await sendTelegramMessage(env, text);
+    }
 
     return res.status(200).json({
       ok: true,
+      preview,
       messagesScanned: messages.length,
       eventsFound: events.length,
       weekStart: dateKey(week.start),
-      weekEnd: dateKey(week.end)
+      weekEnd: dateKey(week.end),
+      text
     });
   } catch (error) {
     console.error(error);
@@ -145,78 +150,85 @@ function extractWeeklyYear2Events(messages, week) {
 
   for (const message of messages) {
     const candidateText = `${message.subject}\n${message.text}`;
-    if (!hasYear2Signal(candidateText)) {
+    if (!hasYear2Signal(candidateText) && !isRelevantGeneralNotice(candidateText)) {
       continue;
     }
 
-    const windows = windowsAroundWeekDates(candidateText, week);
-    for (const windowText of windows) {
-      if (!hasYear2Signal(windowText) && !hasYear2Signal(message.subject)) {
+    const windows = windowsAroundWeekDates(candidateText, week, message.date);
+    for (const { date, text } of windows) {
+      if (
+        !hasYear2Signal(text) &&
+        !hasYear2Signal(message.subject) &&
+        !isRelevantGeneralNotice(text)
+      ) {
         continue;
       }
 
-      const parsedDates = parseDates(windowText, week.start);
-      for (const parsed of parsedDates) {
-        const start = parsed.start.date();
-        if (!isWithin(start, week.start, week.end)) {
-          continue;
-        }
-
-        const title = inferTitle(message.subject, windowText);
-        const times = extractTimes(windowText);
-        const notes = inferNotes(windowText);
-        const key = `${dateKey(start)}|${title}|${times.join(",")}`;
-
-        if (!eventsByKey.has(key)) {
-          eventsByKey.set(key, {
-            date: start,
-            title,
-            times,
-            notes,
-            sourceSubject: message.subject
-          });
-        }
+      const event = buildEvent(message.subject, text, date);
+      if (!event) {
+        continue;
       }
+
+      const key = `${dateKey(event.date)}|${event.type}`;
+      const current = eventsByKey.get(key);
+      eventsByKey.set(key, current ? mergeEvents(current, event) : event);
     }
   }
 
   return [...eventsByKey.values()].sort((a, b) => {
     const dateDiff = a.date.getTime() - b.date.getTime();
     if (dateDiff !== 0) return dateDiff;
-    return (a.times[0] || "").localeCompare(b.times[0] || "");
+    return (a.time || "").localeCompare(b.time || "");
   });
 }
 
-function windowsAroundWeekDates(text, week) {
+function windowsAroundWeekDates(text, week, messageDate) {
   const normalized = normalizeText(text);
   const paragraphs = normalized.split(/\n{2,}|(?<=\.)\s+(?=[A-Z])/);
   const windows = [];
+  const referenceDate = messageDate instanceof Date ? messageDate : new Date(messageDate);
 
   for (let index = 0; index < paragraphs.length; index += 1) {
     const paragraph = paragraphs[index];
-    const parsedDates = parseDates(paragraph, week.start);
-    const hasWeekDate = parsedDates.some((parsed) => isWithin(parsed.start.date(), week.start, week.end));
-    if (!hasWeekDate) {
-      continue;
-    }
+    const parsedDates = parseDates(paragraph, referenceDate).filter((parsed) =>
+      hasDateExpression(parsed.text)
+    );
 
-    windows.push(
-      [
+    for (const parsed of parsedDates) {
+      const date = parsed.start.date();
+      if (!isWithin(date, week.start, week.end)) {
+        continue;
+      }
+
+      const windowText = [
         paragraphs[index - 1],
         paragraph,
         paragraphs[index + 1],
-        paragraphs[index + 2]
+        paragraphs[index + 2],
+        paragraphs[index + 3]
       ]
         .filter(Boolean)
-        .join("\n")
-    );
+        .join("\n");
+
+      windows.push({ date, text: windowText });
+    }
   }
 
-  return windows;
+  return dedupeWindows(windows);
 }
 
 function hasYear2Signal(text) {
   return /\b(year\s*2|y2)\b/i.test(text);
+}
+
+function isRelevantGeneralNotice(text) {
+  return /\b(?:summer uniform|pe kit|school closed|school closure)\b/i.test(text);
+}
+
+function hasDateExpression(text) {
+  return /\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|today|tomorrow|week commencing)\b|\b\d{1,2}(?:st|nd|rd|th)?\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b|\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b/i.test(
+    text
+  );
 }
 
 function parseDates(text, referenceDate) {
@@ -238,75 +250,170 @@ function parseDates(text, referenceDate) {
   throw new Error("No compatible chrono-node parser found");
 }
 
-function inferTitle(subject, text) {
+function dedupeWindows(windows) {
+  const seen = new Set();
+  return windows.filter((window) => {
+    const key = `${dateKey(window.date)}|${window.text}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function mergeEvents(current, incoming) {
+  const time =
+    timeSpecificity(incoming.time) > timeSpecificity(current.time)
+      ? incoming.time
+      : current.time;
+
+  return {
+    ...current,
+    time,
+    details: [...new Set([...current.details, ...incoming.details])],
+    score: Math.max(current.score, incoming.score)
+  };
+}
+
+function timeSpecificity(value) {
+  if (!value) return 0;
+  if (value.includes("-")) return 2;
+  return 1;
+}
+
+function buildEvent(subject, text, date) {
   const combined = `${subject}\n${text}`;
-  const subjectTitle = subject.replace(/^fwd:\s*/i, "").trim();
+  const lower = combined.toLowerCase();
 
-  const patterns = [
-    /year\s*2[^.\n]*(trip|visit)[^.\n]*/i,
-    /year\s*2[^.\n]*(performance)[^.\n]*/i,
-    /year\s*2[^.\n]*(swimming|club|concert|meeting)[^.\n]*/i,
-    /(?:trip|visit)[^.\n]*(year\s*2|botanic|garden)[^.\n]*/i,
-    /(?:performance)[^.\n]*(year\s*2|Hayward)[^.\n]*/i
-  ];
-
-  for (const pattern of patterns) {
-    const match = combined.match(pattern);
-    if (match) {
-      return sentenceCase(cleanTitle(match[0]));
+  if (lower.includes("performance")) {
+    const start = firstTime(combined, [
+      /(?:begin|starts?|commence)\w*\s+(?:promptly\s+)?at\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i,
+      /performance[^.\n]*?\bat\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i
+    ]);
+    const end = firstTime(combined, [
+      /(?:end|finish|conclude)\w*[^.\n]*?\bat\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i
+    ]);
+    const arrival = firstTime(combined, [
+      /not\s+(?:to\s+)?arrive[^.\n]*?before\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i
+    ]);
+    const notes = [];
+    if (/thick(?:er)? costumes?|onesies/i.test(combined)) {
+      notes.push("thick costumes: bring shorts and a T-shirt");
     }
+    if (/photography or recordings[^.\n]*not permitted|no photography/i.test(combined)) {
+      notes.push("no parent photography or recording");
+    }
+    if (/wrap ?around care/i.test(combined)) {
+      notes.push("collection after the show unless wraparound is booked");
+    }
+
+    return {
+      date,
+      type: "performance",
+      title: "Year 2 Summer Performance",
+      time: formatTimeRange(start, end),
+      details: [
+        arrival ? `Parents: arrive no earlier than ${arrival}` : null,
+        ...notes
+      ].filter(Boolean),
+      score: 20 + notes.length + Boolean(start) + Boolean(end)
+    };
   }
 
-  return sentenceCase(cleanTitle(subjectTitle || "Year 2 activity"));
+  if (/\b(botanic gardens?|botanic garden)\b/i.test(combined)) {
+    const leave = firstTime(combined, [
+      /(?:leave|leaving|depart)\w*[^.\n]*?\bat\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i
+    ]);
+    const back = firstTime(combined, [
+      /(?:back|return|arrival back)[^.\n]*?\b(?:for|at|by)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i
+    ]);
+    const bring = [];
+    if (/backpack/i.test(combined)) bring.push("backpack");
+    if (/water bottle/i.test(combined)) bring.push("water bottle");
+    if (/sun ?hat/i.test(combined)) bring.push("sun hat");
+    if (/rain ?coat/i.test(combined)) bring.push("raincoat");
+
+    return {
+      date,
+      type: "botanic-trip",
+      title: "Year 2 Botanic Gardens trip",
+      time: formatTimeRange(leave, back),
+      details: [
+        /school uniform/i.test(combined) ? "School uniform" : null,
+        bring.length ? `Bring: ${bring.join(", ")}` : null
+      ].filter(Boolean),
+      score: 20 + bring.length + Boolean(leave) + Boolean(back)
+    };
+  }
+
+  if (/\bmove[- ]?up|transition morning\b/i.test(combined)) {
+    const start = firstTime(combined, [
+      /(?:from|at|promptly at)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i
+    ]);
+    return {
+      date,
+      type: "move-up",
+      title: "Year 2 Move-Up morning",
+      time: start,
+      details: ["Year 2 pupils visit the Prep school and Year 3 teaching team"],
+      score: 10 + Boolean(start)
+    };
+  }
+
+  if (/\bswimming lessons?\b/i.test(combined)) {
+    return {
+      date,
+      type: "swimming",
+      title: "Year 2 swimming lesson",
+      time: /\bmorning\b/i.test(combined) ? "morning" : "",
+      details: [],
+      score: 5
+    };
+  }
+
+  if (/\b(?:summer uniform|pe kit)\b/i.test(combined)) {
+    return {
+      date,
+      type: "uniform",
+      title: "Hot-weather uniform adjustment",
+      time: "",
+      details: ["PE kit may be worn instead of summer uniform"],
+      score: 5
+    };
+  }
+
+  return null;
 }
 
-function extractTimes(text) {
-  const times = new Set();
-  const patterns = [
-    /\b(?:at|from|by|before|after|until|for)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm))\b/gi,
-    /\b(\d{1,2}:\d{2}\s*(?:am|pm)?)\b/gi,
-    /\b(\d{1,2}\s*(?:am|pm))\b/gi
-  ];
-
+function firstTime(text, patterns) {
   for (const pattern of patterns) {
-    for (const match of text.matchAll(pattern)) {
-      times.add(normalizeTime(match[1]));
+    const match = text.match(pattern);
+    if (match?.[1]) {
+      return normalizeTime(match[1]);
     }
   }
-
-  return [...times];
+  return "";
 }
 
-function inferNotes(text) {
-  const noteBits = [];
-  const lower = text.toLowerCase();
-
-  if (lower.includes("backpack")) noteBits.push("bring backpack");
-  if (lower.includes("water bottle")) noteBits.push("bring water bottle");
-  if (lower.includes("sun hat") || lower.includes("sunhat")) noteBits.push("bring sun hat");
-  if (lower.includes("raincoat") || lower.includes("rain coat")) noteBits.push("bring raincoat");
-  if (lower.includes("school uniform")) noteBits.push("school uniform");
-  if (lower.includes("no photography") || lower.includes("photography or recordings")) {
-    noteBits.push("no parent photography/recording");
-  }
-  if (lower.includes("wrap around") || lower.includes("wraparound")) {
-    noteBits.push("wraparound as booked");
-  }
-
-  return noteBits;
+function formatTimeRange(start, end) {
+  if (start && end) return `${start}-${end}`;
+  return start || end || "";
 }
 
 function formatTelegramMessage(events, week) {
-  const header = `Year 2 activities: ${formatDate(week.start)} - ${formatDate(week.end)}`;
+  const header = `Year 2 this week: ${formatDate(week.start)} - ${formatDate(week.end)}`;
   if (!events.length) {
     return `${header}\n\nNo Year 2 activities found in the latest school emails.`;
   }
 
   const lines = [header, ""];
   for (const event of events) {
-    const timeText = event.times.length ? ` (${event.times.join(", ")})` : "";
-    const notesText = event.notes.length ? `\n   Notes: ${event.notes.join("; ")}` : "";
-    lines.push(`- ${formatDate(event.date)}${timeText}: ${event.title}${notesText}`);
+    const timeText = event.time ? `, ${event.time}` : "";
+    lines.push(`- ${formatDate(event.date)}${timeText}: ${event.title}`);
+    for (const detail of event.details) {
+      lines.push(`  ${detail}`);
+    }
   }
 
   return lines.join("\n");
@@ -431,3 +538,8 @@ function formatAddress(address) {
   const mailbox = address.address || `${address.mailbox || ""}@${address.host || ""}`;
   return address.name ? `${address.name} <${mailbox}>` : mailbox;
 }
+
+export const __test = {
+  extractWeeklyYear2Events,
+  formatTelegramMessage
+};

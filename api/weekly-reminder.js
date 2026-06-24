@@ -155,7 +155,7 @@ function extractWeeklyYear2Events(messages, week) {
         continue;
       }
 
-      const parsedDates = chrono.en.GB.casual.parse(windowText, week.start, { forwardDate: true });
+      const parsedDates = parseDates(windowText, week.start);
       for (const parsed of parsedDates) {
         const start = parsed.start.date();
         if (!isWithin(start, week.start, week.end)) {
@@ -194,7 +194,7 @@ function windowsAroundWeekDates(text, week) {
 
   for (let index = 0; index < paragraphs.length; index += 1) {
     const paragraph = paragraphs[index];
-    const parsedDates = chrono.en.GB.casual.parse(paragraph, week.start, { forwardDate: true });
+    const parsedDates = parseDates(paragraph, week.start);
     const hasWeekDate = parsedDates.some((parsed) => isWithin(parsed.start.date(), week.start, week.end));
     if (!hasWeekDate) {
       continue;
@@ -217,6 +217,25 @@ function windowsAroundWeekDates(text, week) {
 
 function hasYear2Signal(text) {
   return /\b(year\s*2|y2)\b/i.test(text);
+}
+
+function parseDates(text, referenceDate) {
+  const options = { forwardDate: true };
+  const parsers = [
+    chrono.en?.GB?.casual,
+    chrono.en?.GB,
+    chrono.en?.casual,
+    chrono.casual,
+    chrono
+  ];
+
+  for (const parser of parsers) {
+    if (typeof parser?.parse === "function") {
+      return parser.parse(text, referenceDate, options);
+    }
+  }
+
+  throw new Error("No compatible chrono-node parser found");
 }
 
 function inferTitle(subject, text) {

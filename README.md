@@ -10,6 +10,7 @@ This project is designed for Vercel serverless functions and Vercel Cron. It rea
   - Runs the reminder job.
   - Triggered by Vercel Cron every Sunday.
   - Add `?preview=1` to return the generated message without sending it.
+  - Add `?period=current` to summarize today through Sunday instead of next week.
 
 - `GET /api/telegram-chat-id`
   - Helper endpoint for setup.
@@ -73,3 +74,12 @@ Inspect the generated summary without sending a Telegram message:
 curl -H "Authorization: Bearer <CRON_SECRET>" \
   "https://<your-vercel-domain>/api/weekly-reminder?preview=1"
 ```
+
+Inspect activities from today through Sunday:
+
+```bash
+curl -H "Authorization: Bearer <CRON_SECRET>" \
+  "https://<your-vercel-domain>/api/weekly-reminder?period=current&preview=1"
+```
+
+Remove `&preview=1` to send that current-week summary to Telegram.

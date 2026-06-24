@@ -26,10 +26,11 @@ export default async function handler(req, res) {
   try {
     const env = readEnv();
     const now = new Date();
-    const week = getNextSchoolWeek(now);
+    const period = req.query?.period === "current" ? "current" : "next";
+    const week = getSchoolWeek(now, period);
     const messages = await fetchSchoolMessages(env, week.lookbackStart);
     const events = extractWeeklyYear2Events(messages, week);
-    const text = formatTelegramMessage(events, week);
+    const text = formatTelegramMessage(events, week, period);
 
     const preview = req.query?.preview === "1" || req.query?.preview === "true";
     if (!preview) {
@@ -39,6 +40,7 @@ export default async function handler(req, res) {
     return res.status(200).json({
       ok: true,
       preview,
+      period,
       messagesScanned: messages.length,
       eventsFound: events.length,
       weekStart: dateKey(week.start),
@@ -122,7 +124,7 @@ async function fetchSchoolMessages(env, since) {
         const parsed = await simpleParser(message.source);
         const from = parsed.from?.text || message.envelope?.from?.map(formatAddress).join(", ") || "";
         const subject = parsed.subject || message.envelope?.subject || "";
-        const text = normalizeText(parsed.text || stripHtml(parsed.html || ""));
+        const text = sanitizeEmailText(parsed.text || stripHtml(parsed.html || ""));
         const haystack = `${from}\n${subject}\n${text}`.toLowerCase();
 
         if (!SCHOOL_MATCHES.some((match) => haystack.includes(match))) {
@@ -164,7 +166,8 @@ function extractWeeklyYear2Events(messages, week) {
         continue;
       }
 
-      const event = buildEvent(message.subject, text, date);
+      const detailText = hasYear2Signal(message.subject) ? candidateText : text;
+      const event = buildEvent(message.subject, detailText, date);
       if (!event) {
         continue;
       }
@@ -187,12 +190,18 @@ function windowsAroundWeekDates(text, week, messageDate) {
   const paragraphs = normalized.split(/\n{2,}|(?<=\.)\s+(?=[A-Z])/);
   const windows = [];
   const referenceDate = messageDate instanceof Date ? messageDate : new Date(messageDate);
+  const messageHasExplicitDates = hasExplicitCalendarDate(normalized);
 
   for (let index = 0; index < paragraphs.length; index += 1) {
     const paragraph = paragraphs[index];
-    const parsedDates = parseDates(paragraph, referenceDate).filter((parsed) =>
-      hasDateExpression(parsed.text)
-    );
+    const paragraphHasExplicitDate = hasExplicitCalendarDate(paragraph);
+    if (messageHasExplicitDates && !paragraphHasExplicitDate) {
+      continue;
+    }
+
+    const parsedDates = parseDates(paragraph, referenceDate, {
+      forwardDate: !paragraphHasExplicitDate
+    }).filter((parsed) => hasDateExpression(parsed.text));
 
     for (const parsed of parsedDates) {
       const date = parsed.start.date();
@@ -231,8 +240,13 @@ function hasDateExpression(text) {
   );
 }
 
-function parseDates(text, referenceDate) {
-  const options = { forwardDate: true };
+function hasExplicitCalendarDate(text) {
+  return /\b\d{1,2}(?:st|nd|rd|th)?\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b|\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b/i.test(
+    text
+  );
+}
+
+function parseDates(text, referenceDate, options = { forwardDate: true }) {
   const parsers = [
     chrono.en?.GB?.casual,
     chrono.en?.GB,
@@ -401,8 +415,9 @@ function formatTimeRange(start, end) {
   return start || end || "";
 }
 
-function formatTelegramMessage(events, week) {
-  const header = `Year 2 this week: ${formatDate(week.start)} - ${formatDate(week.end)}`;
+function formatTelegramMessage(events, week, period = "next") {
+  const label = period === "current" ? "Year 2, remaining this week" : "Year 2 this week";
+  const header = `${label}: ${formatDate(week.start)} - ${formatDate(week.end)}`;
   if (!events.length) {
     return `${header}\n\nNo Year 2 activities found in the latest school emails.`;
   }
@@ -436,12 +451,21 @@ async function sendTelegramMessage(env, text) {
   }
 }
 
-function getNextSchoolWeek(now) {
+function getSchoolWeek(now, period = "next") {
   const londonNow = londonDateAtNoon(now);
   const day = londonNow.getUTCDay();
-  const daysUntilMonday = (8 - day) % 7 || 7;
-  const start = addDays(londonNow, daysUntilMonday);
-  const end = addDays(start, 6);
+  let start;
+  let end;
+
+  if (period === "current") {
+    start = londonNow;
+    end = addDays(londonNow, day === 0 ? 0 : 7 - day);
+  } else {
+    const daysUntilMonday = (8 - day) % 7 || 7;
+    start = addDays(londonNow, daysUntilMonday);
+    end = addDays(start, 6);
+  }
+
   const lookbackStart = addDays(londonNow, -45);
 
   return {
@@ -502,6 +526,13 @@ function normalizeText(value) {
     .trim();
 }
 
+function sanitizeEmailText(value) {
+  return normalizeText(value)
+    .replace(/^Exchange Received:.*$/gim, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function stripHtml(html) {
   return String(html || "")
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
@@ -541,5 +572,6 @@ function formatAddress(address) {
 
 export const __test = {
   extractWeeklyYear2Events,
-  formatTelegramMessage
+  formatTelegramMessage,
+  getSchoolWeek
 };

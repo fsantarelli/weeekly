@@ -4,16 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vercel dev",
-    "test": "node --check api/weekly-reminder.js"
+    "test": "node --test"
   },
   "dependencies": {
     "chrono-node": "^2.8.4",
     "imapflow": "^1.0.191",
     "mailparser": "^3.7.4"
-  },
-  "devDependencies": {
-    "vercel": "^44.2.6"
   },
   "engines": {
     "node": ">=20"

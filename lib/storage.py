@@ -58,3 +58,12 @@ def was_sunday_summary_sent(year_group: str, week_start: str) -> bool:
 def mark_sunday_summary_sent(year_group: str, week_start: str) -> None:
     # Expire after 8 days so the guard key doesn't linger forever.
     _client().set(f"sunday_sent:{year_group}:{week_start}", "1", ex=8 * 24 * 3600)
+
+
+def was_alerted(year_group: str, activity_key: str) -> bool:
+    return _client().get(f"alerted:{year_group}:{activity_key}") is not None
+
+
+def mark_alerted(year_group: str, activity_key: str) -> None:
+    # Expire after 14 days — well past any "due within N days" alert window.
+    _client().set(f"alerted:{year_group}:{activity_key}", "1", ex=14 * 24 * 3600)

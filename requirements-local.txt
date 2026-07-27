@@ -1,0 +1,5 @@
+# For scripts/process_emails.py — run locally, not deployed to Vercel.
+# Also requires the `claude` CLI to be installed and logged in.
+upstash-redis>=1.2.0
+IMAPClient>=3.0.1
+python-dotenv>=1.0.0

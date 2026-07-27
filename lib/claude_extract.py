@@ -1,50 +1,24 @@
-import os
+import json
+import subprocess
 from typing import List, TypedDict
-
-from anthropic import Anthropic
-
-_client = None
 
 _DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
-_TOOL = {
-    "name": "record_activities",
-    "description": "Record the school activities/events/action-items found in this email.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "activities": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "day_of_week": {
-                            "type": "string",
-                            "enum": _DAYS,
-                            "description": "The day this activity happens on.",
-                        },
-                        "date": {
-                            "type": "string",
-                            "description": "ISO date (YYYY-MM-DD) for the activity if determinable from the email, else omit.",
-                        },
-                        "title": {"type": "string", "description": "Short title, e.g. 'Tuck shop'."},
-                        "description": {"type": "string", "description": "1-2 sentence summary."},
-                        "action_required": {
-                            "type": "boolean",
-                            "description": "True if a parent needs to do something (bring an item, sign a form, pay, etc.).",
-                        },
-                        "action_text": {
-                            "type": "string",
-                            "description": "What the parent needs to do, if action_required is true. Empty string otherwise.",
-                        },
-                    },
-                    "required": ["day_of_week", "title", "description", "action_required", "action_text"],
-                },
-            }
-        },
-        "required": ["activities"],
-    },
-}
+_INSTRUCTIONS = (
+    "You extract school activities from parent emails. Given an email's subject and "
+    "body, identify every distinct activity, event, or action-item relevant to the "
+    "school week (e.g. dress-up days, trips, payments due, items to bring, forms to "
+    "sign). Ignore signatures, disclaimers, and unrelated newsletter content.\n\n"
+    "Respond with ONLY a JSON array (no prose, no markdown code fences) of objects "
+    "with exactly these keys:\n"
+    f'  "day_of_week": one of {_DAYS}\n'
+    '  "date": ISO date "YYYY-MM-DD" if determinable, else ""\n'
+    '  "title": short title, e.g. "Tuck shop"\n'
+    '  "description": 1-2 sentence summary\n'
+    '  "action_required": true/false — true if a parent needs to do something\n'
+    '  "action_text": what the parent needs to do if action_required is true, else ""\n\n'
+    "If the email contains no concrete activity, respond with an empty array: []"
+)
 
 
 class Activity(TypedDict):
@@ -56,40 +30,45 @@ class Activity(TypedDict):
     action_text: str
 
 
-def _get_client() -> Anthropic:
-    global _client
-    if _client is None:
-        _client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    return _client
+def _strip_code_fence(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else ""
+        if text.endswith("```"):
+            text = text[: -len("```")]
+    return text.strip()
 
 
 def extract_activities(subject: str, body: str, received_at: str) -> List[Activity]:
-    """Ask Claude to pull structured day/activity data out of one school email."""
+    """Ask the local Claude Code CLI to pull structured activities out of one email.
+
+    Runs `claude` headlessly (uses the logged-in Claude subscription on this
+    machine, not the metered Anthropic API) so it must be run locally, not from
+    a Vercel serverless function.
+    """
     prompt = (
+        f"{_INSTRUCTIONS}\n\n"
         f"This email was received at {received_at or 'an unknown time'}.\n\n"
         f"Subject: {subject}\n\n"
-        f"Body:\n{body[:12000]}\n\n"
-        "Extract every distinct activity, event, or action-item relevant to the "
-        "school week (e.g. dress-up days, trips, payments due, items to bring, "
-        "forms to sign). Ignore signatures, disclaimers, and unrelated newsletter "
-        "content. If the email mentions no concrete activity, call the tool with "
-        "an empty activities list."
+        f"Body:\n{body[:12000]}"
     )
 
-    response = _get_client().messages.create(
-        model="claude-sonnet-5",
-        max_tokens=2048,
-        tools=[_TOOL],
-        tool_choice={"type": "tool", "name": "record_activities"},
-        messages=[{"role": "user", "content": prompt}],
+    result = subprocess.run(
+        ["claude", "-p", prompt],
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
+    if result.returncode != 0:
+        raise RuntimeError(f"claude CLI failed (exit {result.returncode}): {result.stderr.strip()}")
 
-    for block in response.content:
-        if block.type == "tool_use" and block.name == "record_activities":
-            activities = block.input.get("activities", [])
-            for activity in activities:
-                activity.setdefault("date", "")
-                activity.setdefault("action_text", "")
-            return activities
+    raw = _strip_code_fence(result.stdout)
+    try:
+        activities = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"claude CLI returned non-JSON output: {raw[:500]!r}") from exc
 
-    return []
+    for activity in activities:
+        activity.setdefault("date", "")
+        activity.setdefault("action_text", "")
+    return activities

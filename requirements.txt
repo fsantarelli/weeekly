@@ -1,0 +1,4 @@
+anthropic>=0.40.0
+upstash-redis>=1.2.0
+requests>=2.31.0
+IMAPClient>=3.0.1
